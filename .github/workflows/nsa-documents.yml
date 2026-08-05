@@ -23,7 +23,7 @@ permissions:
 jobs:
   documents:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
 
     steps:
       - name: Checkout
@@ -92,8 +92,8 @@ jobs:
             --output-dir documents-output
             --proxy http://127.0.0.1:8080
             --limit "${{ inputs.limit }}"
-            --delay-min 10
-            --delay-max 15
+            --delay-min 1
+            --delay-max 2
           )
 
           if [[ -n "${RESUME_JSONL:-}" ]]; then
