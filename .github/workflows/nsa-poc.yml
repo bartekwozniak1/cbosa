@@ -1,0 +1,59 @@
+name: NSA CBO proof of concept
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+    paths:
+      - nsa-poc.sh
+      - Makefile
+      - .github/workflows/nsa-poc.yml
+
+permissions:
+  contents: read
+
+jobs:
+  nsa-poc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Start hola-proxy
+        run: make proxy
+
+      - name: Show proxy process
+        run: |
+          cat /tmp/hola-proxy.pid
+          ps -fp "$(cat /tmp/hola-proxy.pid)"
+          make logs
+
+      - name: Run NSA test
+        id: test
+        continue-on-error: true
+        run: ./nsa-poc.sh
+
+      - name: Show report
+        if: always()
+        run: |
+          echo "===== NSA_POC_REPORT.md ====="
+          cat nsa-poc-output/NSA_POC_REPORT.md 2>/dev/null || true
+          echo
+          echo "===== PROXY LOG ====="
+          make logs || true
+
+      - name: Upload complete audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nsa-cbo-poc-${{ github.run_id }}
+          path: nsa-poc-output
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Fail when test failed
+        if: steps.test.outcome == 'failure'
+        run: exit 1
