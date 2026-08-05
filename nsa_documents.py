@@ -432,9 +432,57 @@ def load_manifest(path: Path, limit: int) -> list[dict[str, Any]]:
     return records
 
 
-def write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
-    with path.open("w", encoding="utf-8") as handle:
-        for record in records:
+def load_documents(path: Path | None) -> dict[str, dict[str, Any]]:
+    records: dict[str, dict[str, Any]] = {}
+
+    if path is None or not path.exists():
+        return records
+
+    for line in path.read_text(
+        encoding="utf-8",
+        errors="replace",
+    ).splitlines():
+        line = line.strip()
+
+        if not line:
+            continue
+
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        cbo_id = record.get("cbo_id")
+
+        if cbo_id:
+            records[cbo_id] = record
+
+    return records
+
+
+def write_jsonl(
+    path: Path,
+    records: list[dict[str, Any]] | dict[str, dict[str, Any]],
+) -> None:
+    values = (
+        list(records.values())
+        if isinstance(records, dict)
+        else records
+    )
+
+    values = sorted(
+        values,
+        key=lambda record: (
+            record.get("judgment_date") or "",
+            record.get("signature") or "",
+            record.get("cbo_id") or "",
+        ),
+    )
+
+    temporary = path.with_suffix(".tmp")
+
+    with temporary.open("w", encoding="utf-8") as handle:
+        for record in values:
             handle.write(
                 json.dumps(
                     record,
@@ -443,6 +491,8 @@ def write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
                 )
                 + "\n"
             )
+
+    temporary.replace(path)
 
 
 def get_proxy_ip(proxy: str) -> str:
@@ -643,6 +693,11 @@ def parse_args() -> argparse.Namespace:
         default=10,
     )
     parser.add_argument(
+        "--resume-jsonl",
+        default=None,
+        help="Poprzedni nsa_documents.jsonl do wznowienia.",
+    )
+    parser.add_argument(
         "--delay-min",
         type=float,
         default=10,
@@ -674,6 +729,15 @@ def main() -> int:
         args.limit,
     )
 
+    resume_path = (
+        Path(args.resume_jsonl).resolve()
+        if args.resume_jsonl
+        else None
+    )
+
+    documents_by_id = load_documents(resume_path)
+    resumed_count = len(documents_by_id)
+
     proxy_ip = get_proxy_ip(args.proxy)
 
     print("=" * 100)
@@ -681,16 +745,32 @@ def main() -> int:
     print("=" * 100)
     print(f"Manifest:            {manifest_path}")
     print(f"Limit:               {args.limit}")
+    print(f"Wznowione rekordy:   {resumed_count}")
+    print(
+        f"Resume JSONL:        "
+        f"{resume_path if resume_path else 'brak'}"
+    )
     print(f"Proxy:               {args.proxy}")
     print(f"Publiczne IP proxy:  {proxy_ip or 'BRAK'}")
     print("-" * 100)
 
-    documents: list[dict[str, Any]] = []
     request_rows: list[dict[str, Any]] = []
     failed_ids: list[str] = []
 
+    pending_records = [
+        record
+        for record in manifest_records
+        if record["cbo_id"] not in documents_by_id
+    ]
+
+    print(
+        f"Do pobrania:          {len(pending_records)} "
+        f"z {len(manifest_records)}"
+    )
+    print("-" * 100)
+
     for index, manifest_record in enumerate(
-        manifest_records,
+        pending_records,
         start=1,
     ):
         cbo_id = manifest_record["cbo_id"]
@@ -701,10 +781,10 @@ def main() -> int:
                 args.delay_min,
                 args.delay_max,
             )
-            print(f"[{index}/{len(manifest_records)}] przerwa {delay:.1f} s")
+            print(f"[{index}/{len(pending_records)}] przerwa {delay:.1f} s")
             time.sleep(delay)
 
-        print(f"[{index}/{len(manifest_records)}] GET {url}")
+        print(f"[{index}/{len(pending_records)}] GET {url}")
 
         result, history = request_with_retries(
             url=url,
@@ -752,17 +832,19 @@ def main() -> int:
             source_manifest_record=manifest_record,
         )
 
-        documents.append(document)
+        documents_by_id[cbo_id] = document
 
         write_jsonl(
             output_path,
-            documents,
+            documents_by_id,
         )
 
     write_jsonl(
         output_path,
-        documents,
+        documents_by_id,
     )
+
+    documents = list(documents_by_id.values())
 
     write_audit(
         path=audit_path,
@@ -780,8 +862,10 @@ def main() -> int:
     print("PODSUMOWANIE")
     print("=" * 100)
     print(f"Zaplanowane:         {len(manifest_records)}")
-    print(f"Pobrane:             {len(documents)}")
-    print(f"Nieudane:            {len(failed_ids)}")
+    print(f"Wznowione:           {resumed_count}")
+    print(f"Nowo pobrane:        {len(documents) - resumed_count}")
+    print(f"Łącznie pobrane:     {len(documents)}")
+    print(f"Nieudane obecnie:    {len(failed_ids)}")
     print(
         f"Z sentencją:         "
         f"{sum(1 for d in documents if d.get('has_sentencing'))}"
@@ -794,7 +878,12 @@ def main() -> int:
     print(f"Audyt:               {audit_path}")
     print("=" * 100)
 
-    return 0 if not failed_ids else 2
+    complete = (
+        len(documents_by_id) == len(manifest_records)
+        and not failed_ids
+    )
+
+    return 0 if complete else 2
 
 
 if __name__ == "__main__":

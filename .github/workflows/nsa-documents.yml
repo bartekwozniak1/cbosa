@@ -7,8 +7,12 @@ on:
         description: Run ID workflow nsa-manifest.yml
         required: true
         default: "31024452072"
+      previous_documents_run_id:
+        description: Poprzedni run dokumentów do wznowienia
+        required: false
+        default: ""
       limit:
-        description: Liczba dokumentów do pobrania
+        description: Liczba dokumentów z manifestu
         required: true
         default: "10"
 
@@ -38,9 +42,6 @@ jobs:
             -R "${{ github.repository }}" \
             --dir manifest-input
 
-          echo "===== POBRANE PLIKI ====="
-          find manifest-input -type f -print
-
           MANIFEST="$(
             find manifest-input \
               -name nsa_manifest.jsonl \
@@ -55,19 +56,51 @@ jobs:
 
           echo "MANIFEST_PATH=$MANIFEST" >> "$GITHUB_ENV"
 
+      - name: Download previous document artifact
+        if: inputs.previous_documents_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p previous-documents
+
+          gh run download "${{ inputs.previous_documents_run_id }}" \
+            -R "${{ github.repository }}" \
+            --dir previous-documents
+
+          RESUME_JSONL="$(
+            find previous-documents \
+              -name nsa_documents.jsonl \
+              -print \
+              -quit
+          )"
+
+          if [[ -z "$RESUME_JSONL" ]]; then
+            echo "Nie znaleziono poprzedniego nsa_documents.jsonl"
+            exit 1
+          fi
+
+          echo "RESUME_JSONL=$RESUME_JSONL" >> "$GITHUB_ENV"
+
       - name: Run document downloader
         id: downloader
         continue-on-error: true
         env:
           HTTP_PROXY: http://127.0.0.1:8080
         run: |
-          python3 nsa_documents.py \
-            --manifest "$MANIFEST_PATH" \
-            --output-dir documents-output \
-            --proxy http://127.0.0.1:8080 \
-            --limit "${{ inputs.limit }}" \
-            --delay-min 10 \
+          ARGS=(
+            --manifest "$MANIFEST_PATH"
+            --output-dir documents-output
+            --proxy http://127.0.0.1:8080
+            --limit "${{ inputs.limit }}"
+            --delay-min 10
             --delay-max 15
+          )
+
+          if [[ -n "${RESUME_JSONL:-}" ]]; then
+            ARGS+=(--resume-jsonl "$RESUME_JSONL")
+          fi
+
+          python3 nsa_documents.py "${ARGS[@]}"
 
       - name: Show audit
         if: always()
