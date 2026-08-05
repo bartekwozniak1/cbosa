@@ -21,7 +21,7 @@ cat > "$REPORT" <<EOF
 - Data wyszukiwania: \`$DATE\`
 - Proxy: \`$PROXY\`
 - Odstęp: **$DELAY sekund**
-- Strony testowe: **1–4**
+- Strony testowe: **1–16**
 
 EOF
 
@@ -169,26 +169,47 @@ fi
 
 PREVIOUS_URL="$BASE/cbo/search"
 
-for PAGE in 2 3 4; do
+for PAGE in $(seq 2 16); do
     echo "Przerwa: $DELAY s"
     sleep "$DELAY"
 
-    echo "[$((PAGE + 1))/5] GET /cbo/find?p=$PAGE"
+    echo "[page $PAGE/16] GET /cbo/find?p=$PAGE"
 
-    RESULT="$(
-        request \
-            "0$((PAGE + 1))-find-page-$PAGE" \
-            "GET" \
-            "$BASE/cbo/find?p=$PAGE" \
-            "$PREVIOUS_URL"
-    )"
+    SUCCESS=0
 
-    IFS='|' read -r CURL_EXIT HTTP_STATUS BODY_SIZE <<<"$RESULT"
+    for ATTEMPT in 1 2 3; do
+        RESULT="$(
+            request \
+                "$(printf '%02d' $((PAGE + 1)))-find-page-$PAGE-attempt-$ATTEMPT" \
+                "GET" \
+                "$BASE/cbo/find?p=$PAGE" \
+                "$PREVIOUS_URL"
+        )"
 
-    echo "curl=$CURL_EXIT HTTP=$HTTP_STATUS body=$BODY_SIZE B"
+        IFS='|' read -r CURL_EXIT HTTP_STATUS BODY_SIZE <<<"$RESULT"
 
-    if [[ "$CURL_EXIT" != "0" || "$HTTP_STATUS" != "200" || "$BODY_SIZE" -lt 1000 ]]; then
-        echo "Strona $PAGE nieudana — kończę bez dalszych prób."
+        echo "attempt=$ATTEMPT curl=$CURL_EXIT HTTP=$HTTP_STATUS body=$BODY_SIZE B"
+
+        if [[ "$CURL_EXIT" == "0" && "$HTTP_STATUS" == "200" && "$BODY_SIZE" -ge 1000 ]]; then
+            SUCCESS=1
+            break
+        fi
+
+        if [[ "$ATTEMPT" == "1" ]]; then
+            RETRY_DELAY=30
+        elif [[ "$ATTEMPT" == "2" ]]; then
+            RETRY_DELAY=60
+        else
+            RETRY_DELAY=120
+        fi
+
+        echo "Retry strony $PAGE za $RETRY_DELAY s"
+        sleep "$RETRY_DELAY"
+    done
+
+    if [[ "$SUCCESS" != "1" ]]; then
+        echo "Strona $PAGE nieudana po 3 próbach."
+        echo "$PAGE" > "$OUT/FAILED_PAGE.txt"
         break
     fi
 
@@ -343,3 +364,50 @@ echo "============================================================"
 echo "TEST ZAKOŃCZONY"
 echo "============================================================"
 cat "$REPORT"
+
+FINAL_REPORT="$OUT/NSA_POC_REPORT.md"
+
+UNIQUE_COUNT="$(
+python3 - "$OUT" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+out = Path(sys.argv[1])
+ids = []
+
+for path in out.glob("*.html"):
+    source = path.read_text(encoding="utf-8", errors="replace")
+
+    tables = re.findall(
+        r'''<table\b[^>]*id=["']tab_nsa[^"']*["'][^>]*>.*?</table>''',
+        source,
+        flags=re.I | re.S,
+    )
+
+    for table in tables:
+        match = re.search(
+            r'''href=["']/doc/([0-9A-Fa-f]{10})["']''',
+            table,
+            flags=re.I,
+        )
+        if match:
+            ids.append(match.group(1).upper())
+
+print(len(set(ids)))
+PY
+)"
+
+echo "FINAL_UNIQUE_COUNT=$UNIQUE_COUNT"
+
+if [[ -f "$OUT/FAILED_PAGE.txt" ]]; then
+    echo "Nie pobrano pełnego zakresu. Failed page: $(cat "$OUT/FAILED_PAGE.txt")"
+    exit 40
+fi
+
+if [[ "$UNIQUE_COUNT" != "160" ]]; then
+    echo "Nieprawidłowa liczba unikalnych orzeczeń: $UNIQUE_COUNT zamiast 160"
+    exit 41
+fi
+
+echo "Pełny test zakończony sukcesem: 160 unikalnych orzeczeń."
