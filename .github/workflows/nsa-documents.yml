@@ -1,0 +1,104 @@
+name: NSA document downloader POC
+
+on:
+  workflow_dispatch:
+    inputs:
+      manifest_run_id:
+        description: Run ID workflow nsa-manifest.yml
+        required: true
+        default: "31024452072"
+      limit:
+        description: Liczba dokumentów do pobrania
+        required: true
+        default: "10"
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  documents:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Start hola-proxy
+        run: make proxy
+
+      - name: Download manifest artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p manifest-input
+
+          gh run download "${{ inputs.manifest_run_id }}" \
+            -R "${{ github.repository }}" \
+            --dir manifest-input
+
+          echo "===== POBRANE PLIKI ====="
+          find manifest-input -type f -print
+
+          MANIFEST="$(
+            find manifest-input \
+              -name nsa_manifest.jsonl \
+              -print \
+              -quit
+          )"
+
+          if [[ -z "$MANIFEST" ]]; then
+            echo "Nie znaleziono nsa_manifest.jsonl"
+            exit 1
+          fi
+
+          echo "MANIFEST_PATH=$MANIFEST" >> "$GITHUB_ENV"
+
+      - name: Run document downloader
+        id: downloader
+        continue-on-error: true
+        env:
+          HTTP_PROXY: http://127.0.0.1:8080
+        run: |
+          python3 nsa_documents.py \
+            --manifest "$MANIFEST_PATH" \
+            --output-dir documents-output \
+            --proxy http://127.0.0.1:8080 \
+            --limit "${{ inputs.limit }}" \
+            --delay-min 10 \
+            --delay-max 15
+
+      - name: Show audit
+        if: always()
+        run: |
+          echo "===== NSA_DOCUMENTS_AUDIT.md ====="
+          cat documents-output/NSA_DOCUMENTS_AUDIT.md 2>/dev/null || true
+
+          echo
+          echo "===== DOCUMENT COUNT ====="
+          wc -l documents-output/nsa_documents.jsonl 2>/dev/null || true
+
+          echo
+          echo "===== RAW HTML COUNT ====="
+          find documents-output/raw -name '*.html' 2>/dev/null | wc -l
+
+          echo
+          echo "===== PROXY LOG ====="
+          make logs || true
+
+      - name: Upload document artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nsa-documents-${{ github.run_id }}
+          path: |
+            documents-output/nsa_documents.jsonl
+            documents-output/NSA_DOCUMENTS_AUDIT.md
+            documents-output/raw
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Fail when downloader incomplete
+        if: steps.downloader.outcome == 'failure'
+        run: exit 1
