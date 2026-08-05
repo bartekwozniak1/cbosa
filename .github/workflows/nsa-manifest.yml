@@ -1,0 +1,116 @@
+name: NSA manifest scraper
+
+on:
+  workflow_dispatch:
+    inputs:
+      from_date:
+        description: Data początkowa YYYY-MM-DD
+        required: true
+        default: "2025-01-15"
+      to_date:
+        description: Data końcowa YYYY-MM-DD
+        required: true
+        default: "2025-01-15"
+      reset:
+        description: Usuń poprzedni checkpoint i manifest
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Start hola-proxy
+        run: make proxy
+
+      - name: Show proxy
+        run: |
+          echo "Proxy PID:"
+          cat /tmp/hola-proxy.pid
+          echo
+          echo "Proxy process:"
+          ps -fp "$(cat /tmp/hola-proxy.pid)"
+          echo
+          echo "Proxy log:"
+          make logs || true
+
+      - name: Restore previous output
+        if: inputs.reset == false
+        uses: actions/cache/restore@v4
+        with:
+          path: output
+          key: nsa-manifest-${{ inputs.from_date }}-${{ inputs.to_date }}-${{ github.run_id }}
+          restore-keys: |
+            nsa-manifest-${{ inputs.from_date }}-${{ inputs.to_date }}-
+
+      - name: Run manifest scraper
+        id: scraper
+        continue-on-error: true
+        env:
+          HTTP_PROXY: http://127.0.0.1:8080
+        run: |
+          ARGS=(
+            --from-date "${{ inputs.from_date }}"
+            --to-date "${{ inputs.to_date }}"
+            --court "Naczelny Sąd Administracyjny"
+            --proxy "http://127.0.0.1:8080"
+            --output-dir output
+            --delay-min 10
+            --delay-max 15
+          )
+
+          if [[ "${{ inputs.reset }}" == "true" ]]; then
+            ARGS+=(--reset)
+          fi
+
+          python3 nsa_scraper.py "${ARGS[@]}"
+
+      - name: Save output cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: output
+          key: nsa-manifest-${{ inputs.from_date }}-${{ inputs.to_date }}-${{ github.run_id }}
+
+      - name: Show audit
+        if: always()
+        run: |
+          echo "===== NSA_AUDIT.md ====="
+          cat output/NSA_AUDIT.md 2>/dev/null || true
+
+          echo
+          echo "===== CHECKPOINT ====="
+          cat output/nsa_checkpoint.json 2>/dev/null || true
+
+          echo
+          echo "===== MANIFEST COUNT ====="
+          wc -l output/nsa_manifest.jsonl 2>/dev/null || true
+
+          echo
+          echo "===== PROXY LOG ====="
+          make logs || true
+
+      - name: Upload manifest artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nsa-manifest-${{ inputs.from_date }}-${{ inputs.to_date }}-${{ github.run_id }}
+          path: |
+            output/nsa_manifest.jsonl
+            output/nsa_checkpoint.json
+            output/NSA_AUDIT.md
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Fail when scraper incomplete
+        if: steps.scraper.outcome == 'failure'
+        run: exit 1
